@@ -337,7 +337,7 @@ class TrajectoryComparisonWithCurvature(Scene):
     """
     def construct(self):
         # ===================== 1. 创建道路场景 =====================
-        # 调整轨迹坐标系位置，为曲率图留出空间
+        # 调整轨迹坐标系位置，曲率图放在上方
         axes = Axes(
             x_range=[0, 100, 10],
             y_range=[-2, 6, 1],
@@ -345,7 +345,7 @@ class TrajectoryComparisonWithCurvature(Scene):
             y_length=4.5,
             axis_config={"color": GRAY, "include_numbers": True, "font_size": 16},
             tips=False
-        ).shift(UP * 1.5)  # 向上移动，为曲率图留空间
+        ).shift(DOWN * 1.5)  # 向下移动，为曲率图留空间
         
         labels = axes.get_axis_labels(
             x_label=Text("纵向距离 (m)", font_size=18),
@@ -402,87 +402,315 @@ class TrajectoryComparisonWithCurvature(Scene):
                               for t in np.linspace(0, 1, 200)]
         bezier_trajectory.set_points_as_corners(bezier_points_list)
         
+        # ===================== 3.5. 3次多项式轨迹 =====================
+        # 边界条件：
+        # 起点 (0, 0): 位置y=0, PSI=0 (dy/dx=0)
+        # 终点 (100, 3.5): 位置y=3.5, PSI=0 (dy/dx=0)
+        # 3次多项式: y = a0 + a1*x + a2*x² + a3*x³
+        # 由边界条件解得: y = 3.5 * (3*(x/100)² - 2*(x/100)³)
+        def poly3_lane_change(x):
+            t = x / 100.0
+            # 3次多项式，满足起点终点PSI=0
+            y_normalized = 3 * t**2 - 2 * t**3
+            return y_normalized * lane_width
+        
+        poly3_trajectory = axes.plot(
+            poly3_lane_change,
+            x_range=[0, 100],
+            color=RED,
+            stroke_width=4
+        )
+        
         # ===================== 4. 计算曲率 =====================
         def calculate_poly_curvature(x):
-            """计算多项式轨迹的曲率"""
-            h = 0.5
-            if x - h < 0:
-                x = h
-            if x + h > 100:
-                x = 100 - h
-            y1 = poly_lane_change(x - h)
-            y0 = poly_lane_change(x)
-            y2 = poly_lane_change(x + h)
-            d2y = (y2 - 2*y0 + y1) / (h**2)
-            dy = (y2 - y1) / (2*h)
+            """计算5次多项式轨迹的曲率（使用解析导数）"""
+            t = x / 100.0
+            # 5次多项式: y = 3.5 * (6*t^5 - 15*t^4 + 10*t^3)
+            # 一阶导数: dy/dx = dy/dt * dt/dx = dy/dt / 100
+            # dy/dt = 3.5 * (30*t^4 - 60*t^3 + 30*t^2) = 3.5 * 30 * t^2 * (t^2 - 2*t + 1)
+            #      = 105 * t^2 * (1-t)^2
+            dy_dt = 105 * t**2 * (1-t)**2
+            dy_dx = dy_dt / 100.0
+            
+            # 二阶导数: d²y/dx² = d(dy/dt)/dt * (dt/dx)² = d²y/dt² / 100²
+            # d²y/dt² = 3.5 * (120*t^3 - 180*t^2 + 60*t) = 3.5 * 60 * t * (2*t^2 - 3*t + 1)
+            #         = 210 * t * (2*t^2 - 3*t + 1)
+            d2y_dt2 = 210 * t * (2*t**2 - 3*t + 1)
+            d2y_dx2 = d2y_dt2 / (100.0**2)
+            
             # 曲率公式: κ = |d²y/dx²| / (1 + (dy/dx)²)^(3/2)
-            curvature = abs(d2y) / ((1 + dy**2)**1.5) if abs(dy) < 100 else 0
+            curvature = abs(d2y_dx2) / ((1 + dy_dx**2)**1.5)
+            return curvature
+        
+        def bezier_derivative_1(t, points):
+            """计算5次贝塞尔曲线的一阶导数（解析解）"""
+            n = 5
+            result = np.array([0.0, 0.0, 0.0])
+            for i in range(n):
+                # 一阶导数的伯恩斯坦基函数
+                bernstein = n * math.comb(n-1, i) * (t ** i) * ((1 - t) ** (n-1-i))
+                result += bernstein * (points[i+1] - points[i])
+            return result
+        
+        def bezier_derivative_2(t, points):
+            """计算5次贝塞尔曲线的二阶导数（解析解）"""
+            n = 5
+            result = np.array([0.0, 0.0, 0.0])
+            for i in range(n-1):
+                # 二阶导数的伯恩斯坦基函数
+                bernstein = n * (n-1) * math.comb(n-2, i) * (t ** i) * ((1 - t) ** (n-2-i))
+                result += bernstein * (points[i+2] - 2*points[i+1] + points[i])
+            return result
+        
+        def calculate_poly3_curvature(x):
+            """计算3次多项式轨迹的曲率（使用解析导数）"""
+            t = x / 100.0
+            # 3次多项式: y = 3.5 * (3*t^2 - 2*t^3)
+            # 一阶导数: dy/dx = dy/dt * dt/dx = dy/dt / 100
+            # dy/dt = 3.5 * (6*t - 6*t^2) = 21 * t * (1-t)
+            dy_dt = 21 * t * (1 - t)
+            dy_dx = dy_dt / 100.0
+            
+            # 二阶导数: d²y/dx² = d²y/dt² / 100²
+            # d²y/dt² = 3.5 * (6 - 12*t) = 21 * (1 - 2*t)
+            d2y_dt2 = 21 * (1 - 2*t)
+            d2y_dx2 = d2y_dt2 / (100.0**2)
+            
+            # 曲率公式: κ = |d²y/dx²| / (1 + (dy/dx)²)^(3/2)
+            curvature = abs(d2y_dx2) / ((1 + dy_dx**2)**1.5)
             return curvature
         
         def calculate_bezier_curvature(t):
-            """计算贝塞尔曲线轨迹的曲率"""
-            h = 0.005
-            if t - h < 0:
-                t = h
-            if t + h > 1:
-                t = 1 - h
-            p1 = bezier_5(t - h, control_points_bezier)
-            p0 = bezier_5(t, control_points_bezier)
-            p2 = bezier_5(t + h, control_points_bezier)
-            dp = (p2 - p1) / (2*h)
-            d2p = (p2 - 2*p0 + p1) / (h**2)
-            # 曲率公式: κ = |dp × d²p| / |dp|³
-            if np.linalg.norm(dp[:2]) < 1e-6:
+            """计算5次贝塞尔曲线轨迹的曲率（使用解析导数）"""
+            if t < 0:
+                t = 0
+            if t > 1:
+                t = 1
+            # 计算一阶和二阶导数
+            dp = bezier_derivative_1(t, control_points_bezier)
+            d2p = bezier_derivative_2(t, control_points_bezier)
+            # 曲率公式: κ = |x'y'' - y'x''| / (x'² + y'²)^(3/2)
+            x_prime = dp[0]
+            y_prime = dp[1]
+            x_double_prime = d2p[0]
+            y_double_prime = d2p[1]
+            # 计算分母
+            speed_squared = x_prime**2 + y_prime**2
+            if speed_squared < 1e-10:
                 return 0
-            cross = abs(np.cross(dp[:2], d2p[:2]))
-            curvature = cross / (np.linalg.norm(dp[:2])**3)
+            # 计算分子：叉积的绝对值
+            cross_product = abs(x_prime * y_double_prime - y_prime * x_double_prime)
+            # 曲率
+            curvature = cross_product / (speed_squared ** 1.5)
             return curvature
         
-        # 生成曲率数据点
-        x_samples = np.linspace(5, 95, 200)  # 避免边界问题
-        poly_curvatures = [calculate_poly_curvature(x) for x in x_samples]
-        t_samples = np.linspace(0.05, 0.95, 200)
-        bezier_curvatures = [calculate_bezier_curvature(t) for t in t_samples]
-        # 将贝塞尔曲线的t转换为x坐标
-        bezier_x_samples = [bezier_5(t, control_points_bezier)[0] for t in t_samples]
+        # 生成曲率数据点 - 覆盖完整的0-100m范围
+        # 5次多项式：直接按x采样
+        x_samples = np.linspace(0, 100, 400)  # 覆盖完整0-100m范围，增加采样密度
+        poly_curvatures = []
+        poly_x_valid = []
+        for x in x_samples:
+            try:
+                curv = calculate_poly_curvature(x)
+                poly_curvatures.append(curv)
+                poly_x_valid.append(x)
+            except:
+                pass
         
-        # 归一化曲率用于显示（曲率通常很小，需要放大显示）
-        max_curvature = max(max(poly_curvatures), max(bezier_curvatures))
-        # 调整缩放因子，使曲率曲线在y_range内完整显示
-        scale_factor = 2.8 / max_curvature if max_curvature > 0 else 1.0
+        # 3次多项式：直接按x采样
+        poly3_curvatures = []
+        poly3_x_valid = []
+        for x in x_samples:
+            try:
+                curv = calculate_poly3_curvature(x)
+                poly3_curvatures.append(curv)
+                poly3_x_valid.append(x)
+            except:
+                pass
         
-        # ===================== 5. 创建曲率对比坐标系 =====================
-        # 调整曲率坐标系位置，确保完整显示且不遮挡
+        # 5次贝塞尔曲线：按t采样，然后转换为x坐标
+        t_samples = np.linspace(0, 1, 400)  # 覆盖完整t范围[0,1]
+        bezier_curvatures = []
+        bezier_x_samples = []
+        for t in t_samples:
+            try:
+                curv = calculate_bezier_curvature(t)
+                point = bezier_5(t, control_points_bezier)
+                x_coord = point[0]
+                if 0 <= x_coord <= 100:  # 只保留在有效范围内的点
+                    bezier_curvatures.append(curv)
+                    bezier_x_samples.append(x_coord)
+            except:
+                pass
+        
+        # 找到实际的最大和最小曲率值（包含所有三种曲线）
+        max_poly_curvature = max(poly_curvatures) if poly_curvatures else 0
+        max_poly3_curvature = max(poly3_curvatures) if poly3_curvatures else 0
+        max_bezier_curvature = max(bezier_curvatures) if bezier_curvatures else 0
+        max_curvature = max(max_poly_curvature, max_poly3_curvature, max_bezier_curvature)
+        min_curvature = min(min(poly_curvatures) if poly_curvatures else 0,
+                           min(poly3_curvatures) if poly3_curvatures else 0,
+                           min(bezier_curvatures) if bezier_curvatures else 0)
+        
+        # 计算合适的y轴范围（不对曲率大小进行限制）
+        # 将曲率值转换为显示单位（×10⁻³）
+        curvature_display_max = max_curvature * 1000  # 转换为×10⁻³单位
+        curvature_display_min = min_curvature * 1000
+        
+        # 设置y轴范围，自动适应实际曲率值，留出一些边距
+        curvature_range = curvature_display_max - curvature_display_min
+        if curvature_range < 1e-10:
+            y_max_rounded = max(0.1, curvature_display_max * 1.2) if curvature_display_max > 0 else 0.1
+            y_min_rounded = 0
+        else:
+            y_max_rounded = curvature_display_max * 1.1  # 留出10%的上边距
+            y_min_rounded = max(0, curvature_display_min - curvature_range * 0.1)  # 留出10%的下边距
+        
+        # 设置y轴刻度，自动调整，并确保刻度值精确到小数点后两位
+        y_tick_step = max(0.01, (y_max_rounded - y_min_rounded) / 8)  # 大约8个刻度
+        # 将步长四舍五入到合适的值（如0.01, 0.02, 0.05, 0.1等）
+        if y_tick_step < 0.05:
+            y_tick_step = round(y_tick_step * 100) / 100  # 精确到0.01
+        elif y_tick_step < 0.1:
+            y_tick_step = round(y_tick_step * 20) / 20  # 精确到0.05
+        else:
+            y_tick_step = round(y_tick_step * 10) / 10  # 精确到0.1
+        
+        y_max_rounded = np.ceil(y_max_rounded / y_tick_step) * y_tick_step
+        y_min_rounded = np.floor(y_min_rounded / y_tick_step) * y_tick_step
+        
+        # 创建曲率坐标系，配置y轴数字格式为两位小数
         curvature_axes = Axes(
             x_range=[0, 100, 10],
-            y_range=[0, 3.0, 0.5],
+            y_range=[y_min_rounded, y_max_rounded, y_tick_step],
             x_length=9,
             y_length=3.5,
             axis_config={"color": GRAY, "include_numbers": True, "font_size": 16},
+            y_axis_config={
+                "include_numbers": True,
+                "font_size": 16,
+                "decimal_number_config": {
+                    "num_decimal_places": 2
+                }
+            },
             tips=False
-        ).shift(DOWN * 2.5)  # 调整位置，避免与轨迹图重叠
+        ).shift(UP * 2.5)  # 调整位置到上方，避免与轨迹图重叠
+        
+        # 手动格式化y轴数字为两位小数
+        # 获取y轴上的所有数字并替换为两位小数格式
+        try:
+            y_axis = curvature_axes.y_axis
+            if hasattr(y_axis, 'numbers') and len(y_axis.numbers) > 0:
+                new_numbers = VGroup()
+                for number in y_axis.numbers:
+                    # 尝试从数字对象中提取数值
+                    try:
+                        # 尝试多种方式获取数值
+                        if hasattr(number, 'number'):
+                            value = number.number
+                        elif hasattr(number, 'get_value'):
+                            value = number.get_value()
+                        else:
+                            # 尝试从文本中解析
+                            text = str(number)
+                            # 移除可能的LaTeX标记
+                            text = text.replace('$', '').strip()
+                            value = float(text)
+                        
+                        # 创建新的格式化数字
+                        formatted_text = f"{value:.2f}"
+                        new_number = MathTex(formatted_text, font_size=16, color=GRAY)
+                        new_number.move_to(number.get_center())
+                        new_numbers.add(new_number)
+                    except:
+                        # 如果解析失败，尝试直接格式化文本
+                        try:
+                            text = str(number)
+                            # 尝试提取数字
+                            import re
+                            match = re.search(r'[-+]?\d*\.?\d+', text)
+                            if match:
+                                value = float(match.group())
+                                formatted_text = f"{value:.2f}"
+                                new_number = MathTex(formatted_text, font_size=16, color=GRAY)
+                                new_number.move_to(number.get_center())
+                                new_numbers.add(new_number)
+                            else:
+                                new_numbers.add(number)
+                        except:
+                            # 如果都失败，保留原数字
+                            new_numbers.add(number)
+                # 替换y轴的数字
+                y_axis.numbers = new_numbers
+        except Exception as e:
+            # 如果格式化失败，使用默认格式
+            pass
         
         curvature_labels = curvature_axes.get_axis_labels(
             x_label=Text("纵向距离 (m)", font_size=18),
             y_label=Text("曲率 (×10⁻³)", font_size=18)
         )
         
-        # 绘制曲率曲线
+        # 绘制曲率曲线 - 将曲率值转换为×10⁻³单位显示（不进行缩放限制）
         poly_curvature_curve = VMobject(color=BLUE, stroke_width=3)
-        poly_curvature_points = [curvature_axes.c2p(x, c * scale_factor) 
-                                 for x, c in zip(x_samples, poly_curvatures)]
-        poly_curvature_curve.set_points_as_corners(poly_curvature_points)
+        poly_curvature_points = [curvature_axes.c2p(x, c * 1000) 
+                                 for x, c in zip(poly_x_valid, poly_curvatures)
+                                 if 0 <= x <= 100]  # 确保x在有效范围内
+        if len(poly_curvature_points) > 0:
+            poly_curvature_curve.set_points_as_corners(poly_curvature_points)
         
         bezier_curvature_curve = VMobject(color=GREEN, stroke_width=3)
-        bezier_curvature_points = [curvature_axes.c2p(x, c * scale_factor) 
-                                   for x, c in zip(bezier_x_samples, bezier_curvatures)]
-        bezier_curvature_curve.set_points_as_corners(bezier_curvature_points)
+        bezier_curvature_points = [curvature_axes.c2p(x, c * 1000) 
+                                   for x, c in zip(bezier_x_samples, bezier_curvatures)
+                                   if 0 <= x <= 100]  # 确保x在有效范围内
+        if len(bezier_curvature_points) > 0:
+            bezier_curvature_curve.set_points_as_corners(bezier_curvature_points)
+        
+        poly3_curvature_curve = VMobject(color=RED, stroke_width=3)
+        poly3_curvature_points = [curvature_axes.c2p(x, c * 1000) 
+                                   for x, c in zip(poly3_x_valid, poly3_curvatures)
+                                   if 0 <= x <= 100]  # 确保x在有效范围内
+        if len(poly3_curvature_points) > 0:
+            poly3_curvature_curve.set_points_as_corners(poly3_curvature_points)
         
         # ===================== 6. 动画展示 =====================
-        # 显示道路场景
-        title = Text("换道轨迹与曲率对比", font_size=24, color=YELLOW).to_edge(UP, buff=0.3)
+        # 显示标题
+        title = Text("换道轨迹与曲率对比", font_size=24, color=YELLOW).to_edge(UP, buff=0.1)
         self.play(Write(title), run_time=1)
         
+        # 先显示曲率坐标系（在上方）
+        self.play(
+            Create(curvature_axes),
+            Write(curvature_labels),
+            run_time=1.5
+        )
+        self.wait(0.5)
+        
+        # 显示曲率曲线
+        # 添加曲率曲线图例（根据实际y轴范围动态调整位置）
+        label_y_pos = y_max_rounded * 0.85  # 标签位置在y轴的85%处
+        poly_curvature_label = Text("5次多项式曲率", font_size=14, color=BLUE).next_to(
+            curvature_axes.c2p(15, label_y_pos), RIGHT, buff=0.2
+        )
+        bezier_curvature_label = Text("5次贝塞尔曲率", font_size=14, color=GREEN).next_to(
+            curvature_axes.c2p(15, label_y_pos - y_max_rounded * 0.1), RIGHT, buff=0.2
+        )
+        poly3_curvature_label = Text("3次多项式曲率", font_size=14, color=RED).next_to(
+            curvature_axes.c2p(15, label_y_pos - y_max_rounded * 0.2), RIGHT, buff=0.2
+        )
+        
+        self.play(
+            Create(poly_curvature_curve),
+            Create(bezier_curvature_curve),
+            Create(poly3_curvature_curve),
+            Write(poly_curvature_label),
+            Write(bezier_curvature_label),
+            Write(poly3_curvature_label),
+            run_time=2
+        )
+        self.wait(0.5)
+        
+        # 显示道路场景（在下方）
         self.play(
             Create(axes),
             Write(labels),
@@ -493,42 +721,19 @@ class TrajectoryComparisonWithCurvature(Scene):
         )
         self.wait(0.5)
         
-        # 同时显示两条轨迹
+        # 同时显示三条轨迹
         # 调整标签位置，避免遮挡
         poly_label = Text("5次多项式", font_size=16, color=BLUE).next_to(axes.c2p(85, 5.5), UR, buff=0.2)
         bezier_label = Text("5次贝塞尔曲线", font_size=16, color=GREEN).next_to(axes.c2p(85, 4.8), UR, buff=0.2)
+        poly3_label = Text("3次多项式", font_size=16, color=RED).next_to(axes.c2p(85, 4.1), UR, buff=0.2)
         
         self.play(
             Create(poly_trajectory),
             Create(bezier_trajectory),
+            Create(poly3_trajectory),
             Write(poly_label),
             Write(bezier_label),
-            run_time=2
-        )
-        self.wait(1)
-        
-        # 显示曲率坐标系
-        self.play(
-            Create(curvature_axes),
-            Write(curvature_labels),
-            run_time=1.5
-        )
-        self.wait(0.5)
-        
-        # 显示曲率曲线
-        # 添加曲率曲线图例
-        poly_curvature_label = Text("多项式曲率", font_size=14, color=BLUE).next_to(
-            curvature_axes.c2p(15, 2.5), RIGHT, buff=0.2
-        )
-        bezier_curvature_label = Text("贝塞尔曲率", font_size=14, color=GREEN).next_to(
-            curvature_axes.c2p(15, 2.2), RIGHT, buff=0.2
-        )
-        
-        self.play(
-            Create(poly_curvature_curve),
-            Create(bezier_curvature_curve),
-            Write(poly_curvature_label),
-            Write(bezier_curvature_label),
+            Write(poly3_label),
             run_time=2
         )
         self.wait(1)
@@ -611,19 +816,28 @@ class TrajectoryComparisonWithCurvature(Scene):
         self.wait(2)
         
         # 曲率分析说明 - 放在曲率图右侧，避免遮挡
+        # 计算实际曲率统计（使用原始值，不缩放）
+        poly_avg = np.mean(poly_curvatures) if poly_curvatures else 0
+        bezier_avg = np.mean(bezier_curvatures) if bezier_curvatures else 0
+        poly3_avg = np.mean(poly3_curvatures) if poly3_curvatures else 0
+        poly_max = max_poly_curvature
+        bezier_max = max_bezier_curvature
+        poly3_max = max_poly3_curvature
+        
         curvature_legend = VGroup(
             Text("曲率对比分析:", font_size=16, color=YELLOW),
             Text("", font_size=6),
             Text("蓝色: 5次多项式", font_size=12, color=BLUE),
-            Text("  最大曲率: 0.002018", font_size=11, color=GRAY),
-            Text("  平均曲率: 0.001400", font_size=11, color=GRAY),
-            Text("  起点终点曲率较大", font_size=11, color=GRAY),
+            Text(f"  最大: {poly_max*1000:.3f}×10⁻³", font_size=11, color=GRAY),
+            Text(f"  平均: {poly_avg*1000:.3f}×10⁻³", font_size=11, color=GRAY),
             Text("", font_size=4),
             Text("绿色: 5次贝塞尔", font_size=12, color=GREEN),
-            Text("  最大曲率: 0.001986", font_size=11, color=GREEN),
-            Text("  平均曲率: 0.000928", font_size=11, color=GREEN),
-            Text("  起点终点曲率≈0", font_size=11, color=GRAY),
-            Text("  整体更平顺", font_size=11, color=GREEN)
+            Text(f"  最大: {bezier_max*1000:.3f}×10⁻³", font_size=11, color=GREEN),
+            Text(f"  平均: {bezier_avg*1000:.3f}×10⁻³", font_size=11, color=GREEN),
+            Text("", font_size=4),
+            Text("红色: 3次多项式", font_size=12, color=RED),
+            Text(f"  最大: {poly3_max*1000:.3f}×10⁻³", font_size=11, color=RED),
+            Text(f"  平均: {poly3_avg*1000:.3f}×10⁻³", font_size=11, color=RED)
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.06).scale(0.65).next_to(curvature_axes, RIGHT, buff=0.5)
         
         self.play(Write(curvature_legend), run_time=1.5)
@@ -636,7 +850,8 @@ class TrajectoryComparisonWithCurvature(Scene):
             FadeOut(control_dots),
             FadeOut(control_lines),
             FadeOut(poly_curvature_label),
-            FadeOut(bezier_curvature_label)
+            FadeOut(bezier_curvature_label),
+            FadeOut(poly3_curvature_label)
         )
         
         summary = VGroup(
